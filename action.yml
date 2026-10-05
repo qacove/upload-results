@@ -1,0 +1,65 @@
+name: "QAcove - Subir resultados de pruebas"
+description: "Envía reportes JUnit XML o Playwright JSON a QAcove y registra ejecuciones en los casos coincidentes."
+branding:
+  icon: check-circle
+  color: green
+inputs:
+  api-key:
+    description: "API key de QAcove (con permiso de escritura)"
+    required: true
+  project-id:
+    description: "ID del proyecto en QAcove"
+    required: true
+  report-path:
+    description: "Ruta del reporte (JUnit .xml o Playwright .json)"
+    required: true
+  cycle-id:
+    description: "ID del ciclo (opcional)"
+    required: false
+    default: ""
+  base-url:
+    description: "URL base de QAcove"
+    required: false
+    default: "https://qacove.com"
+  dry-run:
+    description: "Solo simula, no registra"
+    required: false
+    default: "false"
+  fail-on-unmatched:
+    description: "Falla el paso si hay resultados sin caso coincidente"
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        QA_KEY: ${{ inputs.api-key }}
+        QA_PROJECT: ${{ inputs.project-id }}
+        QA_REPORT: ${{ inputs.report-path }}
+        QA_CYCLE: ${{ inputs.cycle-id }}
+        QA_BASE: ${{ inputs.base-url }}
+        QA_DRY: ${{ inputs.dry-run }}
+        QA_FAIL_UNMATCHED: ${{ inputs.fail-on-unmatched }}
+      run: |
+        set -euo pipefail
+        [ -f "$QA_REPORT" ] || { echo "No existe el reporte: $QA_REPORT"; exit 1; }
+        case "$QA_REPORT" in *.xml) CT="application/xml";; *) CT="application/json";; esac
+        URL="${QA_BASE%/}/api/v1/ci/results"
+        Q=$(python3 - <<'PY'
+        import os, urllib.parse as u
+        p={"projectId":os.environ["QA_PROJECT"],
+           "branch":os.environ.get("GITHUB_REF_NAME",""),
+           "commit":os.environ.get("GITHUB_SHA",""),
+           "runUrl":f'{os.environ.get("GITHUB_SERVER_URL","")}/{os.environ.get("GITHUB_REPOSITORY","")}/actions/runs/{os.environ.get("GITHUB_RUN_ID","")}',
+           "idempotencyKey":f'{os.environ.get("GITHUB_RUN_ID","")}-{os.environ.get("GITHUB_RUN_ATTEMPT","1")}'}
+        if os.environ.get("QA_CYCLE"): p["cycleId"]=os.environ["QA_CYCLE"]
+        if os.environ.get("QA_DRY")=="true": p["dryRun"]="true"
+        print(u.urlencode(p))
+        PY
+        )
+        curl -sS -f -X POST "$URL?$Q" -H "Authorization: Bearer $QA_KEY" -H "Content-Type: $CT" --data-binary @"$QA_REPORT" -o resp.json || { cat resp.json 2>/dev/null; exit 1; }
+        cat resp.json; echo
+        if [ "$QA_FAIL_UNMATCHED" = "true" ]; then
+          python3 -c "import json,sys;d=json.load(open('resp.json'));s=d.get('summary',d);sys.exit(1 if s.get('unmatched',0) else 0)"
+        fi
